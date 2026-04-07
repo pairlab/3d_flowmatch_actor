@@ -2,7 +2,15 @@
 
 main_dir=MesaBimanual
 
-DATA_PATH=/storage/project/r-agarg35-0/fchang40/3dfa_data
+source "$(dirname "${BASH_SOURCE[0]}")/horizon_env.sh"
+
+if [ "$ACTION_HORIZON" -ne 1 ]; then
+    echo "train_mesa_keypose.sh only supports ACTION_HORIZON=1 because keypose_only=true collapses multi-step targets." >&2
+    exit 2
+fi
+
+BASE_DATA_PATH="${BASE_DATA_PATH:-/storage/project/r-agarg35-0/fchang40/3dfa_data}"
+DATA_PATH="$(mesa_data_path_for_horizon "$BASE_DATA_PATH")"
 
 train_data_dir=$DATA_PATH/keypose/train.zarr
 eval_data_dir=$DATA_PATH/keypose/val.zarr

@@ -59,6 +59,12 @@ def parse_args():
         default=DEFAULT_MOTION_THRESHOLD,
         help="Motion threshold (meters) for keypose detection.",
     )
+    parser.add_argument(
+        "--action_horizon",
+        type=int,
+        default=1,
+        help="Number of future actions to store per sample.",
+    )
     return parser.parse_args()
 
 
@@ -212,23 +218,27 @@ def detect_keyposes(action_states, motion_threshold):
     return key_idxs.astype(np.int64)
 
 
-def dense_indices(num_steps):
+def dense_indices(num_steps, action_horizon=1):
     current = np.arange(num_steps, dtype=np.int64)
-    target = np.minimum(current + 1, num_steps - 1)
+    offsets = np.arange(1, action_horizon + 1, dtype=np.int64)
+    target = np.minimum(current[:, None] + offsets[None, :], num_steps - 1)
     return current, target
 
 
-def keypose_indices(action_states, motion_threshold):
+def keypose_indices(action_states, motion_threshold, action_horizon=1):
     key_idx = detect_keyposes(action_states, motion_threshold)
-    target = np.empty_like(key_idx)
     if key_idx.size == 0:
-        return key_idx, key_idx
-    target[:-1] = key_idx[1:]
-    target[-1] = key_idx[-1]
+        return key_idx, key_idx.reshape(0, action_horizon)
+    offsets = np.arange(1, action_horizon + 1, dtype=np.int64)
+    target_pos = np.minimum(
+        np.arange(key_idx.size, dtype=np.int64)[:, None] + offsets[None, :],
+        key_idx.size - 1,
+    )
+    target = key_idx[target_pos]
     return key_idx, target
 
 
-def create_zarr(path):
+def create_zarr(path, action_horizon=1):
     compressor = Blosc(cname="lz4", clevel=1, shuffle=Blosc.SHUFFLE)
     path = Path(path)
     if path.exists():
@@ -249,7 +259,7 @@ def create_zarr(path):
     _create("rgb", (NUM_CAMERAS, 3, 128, 128), "uint8")
     _create("depth", (NUM_CAMERAS, 128, 128), "float16")
     _create("proprioception", (NUM_HISTORY, NUM_HANDS, DOF_PER_HAND), "float32")
-    _create("action", (1, NUM_HANDS, DOF_PER_HAND), "float32")
+    _create("action", (action_horizon, NUM_HANDS, DOF_PER_HAND), "float32")
     _create("extrinsics", (NUM_CAMERAS, 4, 4), "float16")
     _create("intrinsics", (NUM_CAMERAS, 3, 3), "float16")
     _create("task_id", (), "uint8")
@@ -268,19 +278,32 @@ def sorted_demo_keys(data_group):
     return sorted(data_group.keys(), key=_demo_index)
 
 
-def append_demo_samples(zarr_group, demo_group, mode, motion_threshold, task_id=0):
+def append_demo_samples(
+    zarr_group,
+    demo_group,
+    mode,
+    motion_threshold,
+    action_horizon=1,
+    task_id=0,
+):
     obs = demo_group["obs"]
     action_states = action_ee_pose_to_8dof(demo_group["abs_actions_ee_pose"][:])
     proprio_states = build_proprioception(obs)
     rgb, depth, extrinsics, intrinsics = extract_observation_tensors(obs)
 
     if mode == "dense":
-        src_idx, tgt_idx = dense_indices(action_states.shape[0])
+        src_idx, tgt_idx = dense_indices(
+            action_states.shape[0], action_horizon=action_horizon
+        )
     else:
-        src_idx, tgt_idx = keypose_indices(action_states, motion_threshold)
+        src_idx, tgt_idx = keypose_indices(
+            action_states,
+            motion_threshold,
+            action_horizon=action_horizon,
+        )
 
     proprio_hist = build_history(proprio_states, src_idx).astype(np.float32)
-    action = action_states[tgt_idx][:, None, :, :].astype(np.float32)
+    action = action_states[tgt_idx].astype(np.float32)
 
     n = int(src_idx.shape[0])
     zarr_group["rgb"].append(rgb[src_idx].astype(np.uint8))
@@ -295,9 +318,17 @@ def append_demo_samples(zarr_group, demo_group, mode, motion_threshold, task_id=
     return n, int(action_states.shape[0])
 
 
-def convert_single_task(task_name, task_id, hdf5_path, output_path, mode, motion_threshold):
+def convert_single_task(
+    task_name,
+    task_id,
+    hdf5_path,
+    output_path,
+    mode,
+    motion_threshold,
+    action_horizon,
+):
     """Convert one task's HDF5 to a standalone Zarr. Process-safe."""
-    zarr_group = create_zarr(output_path)
+    zarr_group = create_zarr(output_path, action_horizon=action_horizon)
     task_samples = 0
     task_steps = 0
     with h5py.File(hdf5_path, "r") as f:
@@ -310,6 +341,7 @@ def convert_single_task(task_name, task_id, hdf5_path, output_path, mode, motion
                 demo_group=data_group[demo_key],
                 mode=mode,
                 motion_threshold=motion_threshold,
+                action_horizon=action_horizon,
                 task_id=task_id,
             )
             task_samples += num_samples
@@ -318,9 +350,9 @@ def convert_single_task(task_name, task_id, hdf5_path, output_path, mode, motion
     return task_name, task_id, task_samples, task_steps
 
 
-def _merge_zarrs(tmp_dir, task_entries, final_path, chunk_size=256):
+def _merge_zarrs(tmp_dir, task_entries, final_path, action_horizon=1, chunk_size=256):
     """Concatenate per-task Zarrs into a single final Zarr in task order."""
-    final = create_zarr(final_path)
+    final = create_zarr(final_path, action_horizon=action_horizon)
     for task_name, _, _ in task_entries:
         src = zarr.open_group(str(tmp_dir / f"{task_name}.zarr"), mode="r")
         n = src[list(src.keys())[0]].shape[0]
@@ -332,7 +364,7 @@ def _merge_zarrs(tmp_dir, task_entries, final_path, chunk_size=256):
     return final
 
 
-def build_mode_dataset(task_entries, output_dir, mode, motion_threshold):
+def build_mode_dataset(task_entries, output_dir, mode, motion_threshold, action_horizon):
     """
     task_entries: list of (task_name, task_id, hdf5_path)
     """
@@ -356,7 +388,13 @@ def build_mode_dataset(task_entries, output_dir, mode, motion_threshold):
             tmp_path = str(tmp_dir / f"{task_name}.zarr")
             fut = pool.submit(
                 convert_single_task,
-                task_name, task_id, hdf5_path, tmp_path, mode, motion_threshold,
+                task_name,
+                task_id,
+                hdf5_path,
+                tmp_path,
+                mode,
+                motion_threshold,
+                action_horizon,
             )
             futures[fut] = task_name
 
@@ -368,7 +406,12 @@ def build_mode_dataset(task_entries, output_dir, mode, motion_threshold):
 
     # Phase 2: merge per-task Zarrs into final Zarr (deterministic task order)
     print("  Merging per-task Zarrs...", flush=True)
-    _merge_zarrs(tmp_dir, task_entries, train_zarr)
+    _merge_zarrs(
+        tmp_dir,
+        task_entries,
+        train_zarr,
+        action_horizon=action_horizon,
+    )
 
     # Cleanup temp
     shutil.rmtree(tmp_dir)
@@ -403,6 +446,8 @@ def discover_tasks(input_dir):
 
 def main():
     args = parse_args()
+    if args.action_horizon < 1:
+        raise ValueError("--action_horizon must be >= 1")
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.input_dir:
@@ -418,6 +463,7 @@ def main():
             output_dir=args.output_dir,
             mode=mode,
             motion_threshold=args.motion_threshold,
+            action_horizon=args.action_horizon,
         )
 
 

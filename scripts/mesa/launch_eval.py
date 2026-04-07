@@ -169,12 +169,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-transport", default="raw",
                         choices=["raw", "meters", "millimeters"])
     parser.add_argument("--state-keys", nargs="+", default=DEFAULT_STATE_KEYS)
-    parser.add_argument("--video-out-path", default="experiments/vla_benchmark")
+    parser.add_argument(
+        "--video-out-path",
+        default=os.path.join(REPO_DIR, "experiments", "vla_benchmark"),
+        help=(
+            "Output root for eval statistics and videos. Must be an absolute "
+            "path because the eval client cd's into the sibling vla-benchmark "
+            "repo before resolving relative paths."
+        ),
+    )
     parser.add_argument("--visualization-camera-name", default="egocentric")
     parser.add_argument("--replan-steps", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=None)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.chunk_size < 1:
+        parser.error("--chunk-size must be >= 1")
+    if args.replan_steps < 1:
+        parser.error("--replan-steps must be >= 1")
+    if args.replan_steps > args.chunk_size:
+        parser.error("--replan-steps cannot exceed --chunk-size")
+    return args
 
 
 def _build_serve_cmd(python_exe: str, args: argparse.Namespace, port: int) -> list[str]:
