@@ -46,3 +46,11 @@ jina
 modeling/policy/old_diffuser_actor
 zarr_datasets
 peract_test.zip
+*.err
+*.out
+.claude
+.codex
+CLAUDE.md
+markdowns/
+artifacts/
+experiments/

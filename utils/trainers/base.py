@@ -31,15 +31,34 @@ class BaseTrainTester:
         self.dataset_cls = dataset_cls
         self.model_cls = model_cls
 
+        img_size = (self.args.custom_img_size,) * 2 if self.args.custom_img_size else (256, 256)
         self.preprocessor = fetch_data_preprocessor(self.args.dataset)(
             self.args.keypose_only,
             self.args.num_history,
             custom_imsize=self.args.custom_img_size,
-            depth2cloud=fetch_depth2cloud(self.args.dataset)
+            depth2cloud=fetch_depth2cloud(self.args.dataset, img_size=img_size)
         )
 
         if dist.get_rank() == 0 and not self.args.eval_only:
             self.writer = SummaryWriter(log_dir=args.log_dir)
+
+    def _init_wandb(self):
+        """Initialize wandb. Called after DataLoader workers are forked."""
+        if dist.get_rank() == 0 and not self.args.eval_only and self.args.use_wandb:
+            import wandb
+            wandb_id_file = self.args.log_dir / "wandb_run_id.txt"
+            wandb_id = wandb_id_file.read_text().strip() if wandb_id_file.exists() else None
+            wandb.init(
+                project=self.args.wandb_project,
+                entity=self.args.wandb_entity,
+                name=str(self.args.run_log_dir),
+                config=vars(self.args),
+                dir=self.args.log_dir,
+                id=wandb_id,
+                resume="allow",
+            )
+            if wandb_id is None:
+                wandb_id_file.write_text(wandb.run.id)
 
     def get_datasets(self):
         """Initialize datasets."""
@@ -284,9 +303,12 @@ class BaseTrainTester:
         epoch = start_iter // samples_per_epoch + 1
         train_sampler.set_epoch(epoch)  # ensures new batches are sampled
 
+        # Prime DataLoader workers before wandb to avoid fork+threads deadlock
+        iter_loader = iter(train_loader)
+        self._init_wandb()
+
         # Training loop
         model.train()
-        iter_loader = iter(train_loader)
         for step_id in trange(start_iter, self.args.train_iters):
             try:
                 sample = next(iter_loader)
@@ -412,6 +434,9 @@ class BaseTrainTester:
             if step_id > -1:
                 for key, val in values.items():
                     self.writer.add_scalar(key, val, step_id)
+                if self.args.use_wandb:
+                    import wandb
+                    wandb.log(values, step=step_id)
 
             # Also log to terminal
             print(f"Step {step_id}:")

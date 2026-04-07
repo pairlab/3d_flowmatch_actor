@@ -5,6 +5,8 @@ from .rlbench import RLBenchTrainTester
 
 def fetch_train_tester(dataset_name):
     dataset_name = dataset_name.lower()
+    if 'mesa' in dataset_name:
+        return RLBenchTrainTester
     if 'peract2' in dataset_name:
         return RLBenchTrainTester
     if 'peract' in dataset_name:

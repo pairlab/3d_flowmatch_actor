@@ -67,7 +67,14 @@ def parse_arguments():
         ('relative_action', str2bool, False),
         ('rotation_format', str, 'quat_xyzw'),
         ('denoise_timesteps', int, 10),
-        ('denoise_model', str, "rectified_flow")
+        ('denoise_model', str, "rectified_flow"),
+        # Wandb logging
+        ('use_wandb', str2bool, False),
+        ('wandb_project', str, "3dfa"),
+        ('wandb_entity', str_none, None),
+        # Node-local data staging
+        ('pace_copy', str2bool, False),
+        ('pace_tmp_dir', str_none, None),
     ]
     for arg in arguments:
         parser.add_argument(f'--{arg[0]}', type=arg[1], default=arg[2])
@@ -110,6 +117,12 @@ if __name__ == '__main__':
     torch.backends.cudnn.deterministic = False
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    # Stage data to node-local storage
+    if args.pace_copy:
+        from utils.pace_copy import copy_zarr_to_local
+        args.train_data_dir = copy_zarr_to_local(args.train_data_dir, args.pace_tmp_dir)
+        args.eval_data_dir = copy_zarr_to_local(args.eval_data_dir, args.pace_tmp_dir)
 
     # Select dataset and model classes
     dataset_class = fetch_dataset_class(args.dataset)
