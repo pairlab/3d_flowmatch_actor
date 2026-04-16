@@ -34,7 +34,7 @@ lv2_batch_size=1
 model_type=smolvla_prefix_kv
 bimanual=true
 keypose_only=false
-pre_tokenize=false   # SmolVLA tokenises internally, but check this to make sure
+pre_tokenize=false   # SmolVLA tokenises internally, but check this to make sure - test
 custom_img_size=128
 workspace_normalizer_buffer=0.04
 
