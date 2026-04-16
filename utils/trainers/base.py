@@ -127,8 +127,8 @@ class BaseTrainTester:
 
     def get_model(self):
         """Initialize the model."""
-        # Initialize model with arguments
-        _model = self.model_cls(
+        # Base kwargs shared by all model types
+        model_kwargs = dict(
             backbone=self.args.backbone,
             finetune_backbone=self.args.finetune_backbone,
             finetune_text_encoder=self.args.finetune_text_encoder,
@@ -143,8 +143,21 @@ class BaseTrainTester:
             rotation_format=self.args.rotation_format,
             denoise_timesteps=self.args.denoise_timesteps,
             denoise_model=self.args.denoise_model,
-            lv2_batch_size=self.args.lv2_batch_size
+            lv2_batch_size=self.args.lv2_batch_size,
         )
+        # Extra kwargs for SmolVLA models
+        if self.args.model_type.startswith("smolvla"):
+            smolvlm_attrs = [
+                "smolvlm_model_name", "smolvlm_local_files_only",
+                "smolvlm_freeze_vision_tower", "smolvlm_freeze_connector",
+                "smolvlm_freeze_text_model", "smolvlm_freeze_text_embeddings",
+                "smolvlm_tokenizer_max_length", "smolvlm_append_state_tokens",
+                "smolvlm_state_dim", "smolvlm_num_state_tokens",
+            ]
+            for attr in smolvlm_attrs:
+                if hasattr(self.args, attr):
+                    model_kwargs[attr] = getattr(self.args, attr)
+        _model = self.model_cls(**model_kwargs)
 
         # Print basic modules' parameters
         if dist.get_rank() == 0:

@@ -68,6 +68,17 @@ def parse_arguments():
         ('rotation_format', str, 'quat_xyzw'),
         ('denoise_timesteps', int, 10),
         ('denoise_model', str, "rectified_flow"),
+        # SmolVLA-specific arguments (used when model_type=smolvla_prefix_kv)
+        ('smolvlm_model_name', str, "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"),
+        ('smolvlm_local_files_only', str2bool, True),
+        ('smolvlm_freeze_vision_tower', str2bool, True),
+        ('smolvlm_freeze_connector', str2bool, True),
+        ('smolvlm_freeze_text_model', str2bool, True),
+        ('smolvlm_freeze_text_embeddings', str2bool, True),
+        ('smolvlm_tokenizer_max_length', int, 48),
+        ('smolvlm_append_state_tokens', str2bool, False),
+        ('smolvlm_state_dim', int, 0),
+        ('smolvlm_num_state_tokens', int, 1),
         # Wandb logging
         ('use_wandb', str2bool, False),
         ('wandb_project', str, "3dfa"),

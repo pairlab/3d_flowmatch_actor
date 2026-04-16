@@ -264,16 +264,6 @@ class SmolVLMEncoder(nn.Module):
         return proprio_feats
 
     # ------------------------------------------------------------------
-    # FPS / density subsampling
-    # ------------------------------------------------------------------
-
-    def run_fps(self, visual_feats, pcd_flat):
-        from .base_encoder import density_based_sampler
-        return density_based_sampler(
-            visual_feats, pcd_flat, self.fps_subsampling_factor
-        )
-
-    # ------------------------------------------------------------------
     # Tokenisation
     # ------------------------------------------------------------------
 
