@@ -437,11 +437,10 @@ class TransformerHead(nn.Module):
             use_adaln=True,
             is_self=True
         )
-        self.rotation_predictor = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, rot_dim)
-        )
+        self.rotation_predictors = nn.ModuleList([
+            self._build_output_head(embedding_dim, rot_dim)
+            for _ in range(2)
+        ])
 
         # 2. Position
         self.position_proj = nn.Linear(embedding_dim, embedding_dim)
@@ -456,18 +455,16 @@ class TransformerHead(nn.Module):
             use_adaln=True,
             is_self=True
         )
-        self.position_predictor = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, 3)
-        )
+        self.position_predictors = nn.ModuleList([
+            self._build_output_head(embedding_dim, 3)
+            for _ in range(2)
+        ])
 
         # 3. Openess
-        self.openess_predictor = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, 1)
-        )
+        self.openess_predictors = nn.ModuleList([
+            self._build_output_head(embedding_dim, 1)
+            for _ in range(2)
+        ])
 
     def forward(self, traj_feats, trajectory, timesteps,
                 rgb3d_feats, rgb3d_pos, rgb2d_feats, rgb2d_pos,
@@ -550,16 +547,16 @@ class TransformerHead(nn.Module):
 
         # Rotation head
         rotation = self.predict_rot(
-            features, rel_pos, time_embs, traj_feats.shape[1]
+            features, rel_pos, time_embs, traj_feats.shape[1], nhand
         )
 
         # Position head
         position, position_features = self.predict_pos(
-            features, rel_pos, time_embs, traj_feats.shape[1]
+            features, rel_pos, time_embs, traj_feats.shape[1], nhand
         )
 
         # Openess head from position head
-        openess = self.openess_predictor(position_features)
+        openess = self.predict_openess(position_features, nhand)
 
         return [
             torch.cat((position, rotation, openess), -1)
@@ -598,7 +595,7 @@ class TransformerHead(nn.Module):
     ):
         return torch.cat([traj_feats, fps_scene_feats], 1)
 
-    def predict_pos(self, features, pos, time_embs, traj_len):
+    def predict_pos(self, features, pos, time_embs, traj_len, nhand):
         position_features = self.position_self_attn(
             seq1=features,
             seq2=features,
@@ -608,10 +605,14 @@ class TransformerHead(nn.Module):
         )[-1]
         position_features = position_features[:, :traj_len]
         position_features = self.position_proj(position_features)  # (B, N, C)
-        position = self.position_predictor(position_features)
+        position = self.predict_per_arm(
+            position_features,
+            self.position_predictors,
+            nhand
+        )
         return position, position_features
 
-    def predict_rot(self, features, pos, time_embs, traj_len):
+    def predict_rot(self, features, pos, time_embs, traj_len, nhand):
         rotation_features = self.rotation_self_attn(
             seq1=features,
             seq2=features,
@@ -621,5 +622,48 @@ class TransformerHead(nn.Module):
         )[-1]
         rotation_features = rotation_features[:, :traj_len]
         rotation_features = self.rotation_proj(rotation_features)  # (B, N, C)
-        rotation = self.rotation_predictor(rotation_features)
+        rotation = self.predict_per_arm(
+            rotation_features,
+            self.rotation_predictors,
+            nhand
+        )
         return rotation
+
+    @staticmethod
+    def _build_output_head(embedding_dim, output_dim):
+        return nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, output_dim)
+        )
+
+    def predict_openess(self, position_features, nhand):
+        return self.predict_per_arm(
+            position_features,
+            self.openess_predictors,
+            nhand
+        )
+
+    def predict_per_arm(self, features, predictors, nhand):
+        """Apply the arm-specific predictor to each flattened hand token."""
+        if nhand == 1 or len(predictors) == 1:
+            return predictors[0](features)
+        if nhand > len(predictors):
+            raise ValueError(
+                f"Only {len(predictors)} per-arm predictors are defined for nhand={nhand}."
+            )
+
+        nheads = min(nhand, len(predictors))
+        out_dim = predictors[0][-1].out_features
+        outputs = torch.empty(
+            *features.shape[:-1],
+            out_dim,
+            device=features.device,
+            dtype=features.dtype
+        )
+        for arm_idx, predictor in enumerate(predictors):
+            arm_tokens = features[:, arm_idx::nheads]
+            if arm_tokens.numel() == 0:
+                continue
+            outputs[:, arm_idx::nheads] = predictor(arm_tokens)
+        return outputs

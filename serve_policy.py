@@ -29,6 +29,7 @@ from scipy.spatial.transform import Rotation
 
 from data_processing.mesa_to_zarr import (
     CAMERA_ORDER,
+    EXTENT,
     JAW_MAX,
     JAW_MIN,
     NUM_HANDS,
@@ -353,7 +354,7 @@ class Mesa3DFAPolicy:
             # The eval client is launched with --depth-transport raw, so we get
             # the MuJoCo z-buffer and linearize with the same constants used in
             # data_processing/mesa_to_zarr.py.
-            depth_m = ZNEAR / (1.0 - raw * (1.0 - ZNEAR / ZFAR))
+            depth_m = ZNEAR * EXTENT / (1.0 - raw * (1.0 - ZNEAR / ZFAR))
             depths.append(depth_m.astype(np.float32))
             intrinsics.append(self._slice_state(state_flat, f"{cam}_intrinsic"))
             extrinsics.append(self._slice_state(state_flat, f"{cam}_extrinsic"))

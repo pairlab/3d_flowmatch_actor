@@ -1,10 +1,10 @@
 #!/bin/bash
 
-main_dir=MesaBimanual
+main_dir=MesaBimanualMultiTask
 
 source "$(dirname "${BASH_SOURCE[0]}")/horizon_env.sh"
 
-BASE_DATA_PATH="${BASE_DATA_PATH:-/storage/project/r-agarg35-0/fchang40/3dfa_data}"
+BASE_DATA_PATH="${BASE_DATA_PATH:-/storage/project/r-agarg35-0/fchang40/3dfa_data/multitask_v2}"
 DATA_PATH="$(mesa_data_path_for_horizon "$BASE_DATA_PATH")"
 RUN_HORIZON_SUFFIX="$(mesa_run_suffix_for_horizon)"
 
@@ -13,7 +13,7 @@ eval_data_dir=$DATA_PATH/dense/val.zarr
 train_instructions=instructions/mesa/instructions.json
 val_instructions=instructions/mesa/instructions.json
 
-dataset=MesaBimanual
+dataset=MesaBimanualMultiTask
 num_workers=2
 B=16
 B_val=16
@@ -57,7 +57,7 @@ denoise_timesteps=5
 denoise_model=rectified_flow
 
 base_log_dir=/storage/project/r-agarg35-0/fchang40/3dfa_checkpoints
-run_log_dir=$model_type-$dataset-C$C-B$B-lr$lr-$lr_scheduler-H$num_history-$denoise_model-dense$RUN_HORIZON_SUFFIX
+run_log_dir=$model_type-$dataset-C$C-B$B-lr$lr-$lr_scheduler-H$num_history-$denoise_model-dense-multitask-v2$RUN_HORIZON_SUFFIX
 checkpoint=${base_log_dir}/${main_dir}/${run_log_dir}/last.pth
 
 ngpus=1
@@ -110,4 +110,4 @@ torchrun --nproc_per_node $ngpus --master_port $RANDOM \
     --use_wandb true \
     --wandb_project 3dfa_bimanual \
     --pace_copy true \
-    --pace_tmp_dir /tmp
+    --pace_tmp_dir /tmp/3dfa_${SLURM_JOB_ID}

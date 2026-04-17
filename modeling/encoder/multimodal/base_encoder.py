@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import nn
 
@@ -71,8 +73,12 @@ class Encoder(nn.Module):
         )
         rgb2d_pos = None
 
-        # Use the current end-effector position as language 'position'
-        instr_pos = proprio[:, -1:, :3].repeat(1, instr_feats.size(1), 1)
+        instr_pos_mode = os.environ.get("MESA_INSTR_POS_MODE", "last")
+        if instr_pos_mode == "midpoint_last_two" and proprio.size(1) >= 2:
+            curr_anchor = proprio[:, -2:, :3].mean(dim=1, keepdim=True)
+        else:
+            curr_anchor = proprio[:, -1:, :3]
+        instr_pos = curr_anchor.repeat(1, instr_feats.size(1), 1)
 
         # Encode proprioception
         proprio_feats = self.encode_proprio(proprio, rgb3d_feats, pcd)

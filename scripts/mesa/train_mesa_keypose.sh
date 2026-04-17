@@ -1,6 +1,12 @@
 #!/bin/bash
 
-main_dir=MesaBimanual
+# Mesa-bimanual keypose training. Variant is selected via env vars; defaults
+# target the FK-action-fix multitask v2 (17-task) zarr. Override DATASET /
+# BASE_DATA_PATH / MAIN_DIR / RUN_SUFFIX to train a different subset (e.g.
+# single-task MesaBimanual or the 2-task depth-fix build).
+#
+# Build the matching zarr first with scripts/mesa/sbatch_build_keypose.sh
+# (single task) or sbatch_build_keypose_multitask.sh (multi-task).
 
 source "$(dirname "${BASH_SOURCE[0]}")/horizon_env.sh"
 
@@ -9,7 +15,10 @@ if [ "$ACTION_HORIZON" -ne 1 ]; then
     exit 2
 fi
 
-BASE_DATA_PATH="${BASE_DATA_PATH:-/storage/project/r-agarg35-0/fchang40/3dfa_data}"
+dataset="${DATASET:-MesaBimanualMultiTask}"
+main_dir="${MAIN_DIR:-$dataset}"
+
+BASE_DATA_PATH="${BASE_DATA_PATH:-/storage/project/r-agarg35-0/fchang40/3dfa_data_fk_fix/multitask_v2}"
 DATA_PATH="$(mesa_data_path_for_horizon "$BASE_DATA_PATH")"
 
 train_data_dir=$DATA_PATH/keypose/train.zarr
@@ -17,26 +26,23 @@ eval_data_dir=$DATA_PATH/keypose/val.zarr
 train_instructions=instructions/mesa/instructions.json
 val_instructions=instructions/mesa/instructions.json
 
-dataset=MesaBimanual
 num_workers=2
-B=8
-B_val=8
+B="${B:-16}"
+B_val="${B_val:-$B}"
 chunk_size=1
 memory_limit=2
 
-# Training arguments
 val_freq=500
 eval_only=false
 lr=1e-4
 backbone_lr=1e-6
 lr_scheduler=constant
 wd=1e-10
-train_iters=50000
+train_iters="${TRAIN_ITERS:-100000}"
 use_compile=false
 use_ema=false
 lv2_batch_size=1
 
-# Model arguments
 model_type=denoise3d
 bimanual=true
 keypose_only=true
@@ -61,7 +67,8 @@ denoise_timesteps=5
 denoise_model=rectified_flow
 
 base_log_dir=/storage/project/r-agarg35-0/fchang40/3dfa_checkpoints
-run_log_dir=$model_type-$dataset-C$C-B$B-lr$lr-$lr_scheduler-H$num_history-$denoise_model-keypose
+run_suffix="${RUN_SUFFIX:--keypose}"
+run_log_dir=$model_type-$dataset-C$C-B$B-lr$lr-$lr_scheduler-H$num_history-$denoise_model$run_suffix
 checkpoint=${base_log_dir}/${main_dir}/${run_log_dir}/last.pth
 
 ngpus=1
@@ -114,4 +121,4 @@ torchrun --nproc_per_node $ngpus --master_port $RANDOM \
     --use_wandb true \
     --wandb_project 3dfa_bimanual \
     --pace_copy true \
-    --pace_tmp_dir /tmp
+    --pace_tmp_dir /tmp/3dfa_${SLURM_JOB_ID}

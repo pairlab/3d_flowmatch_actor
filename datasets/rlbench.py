@@ -1,4 +1,5 @@
 import json
+import os
 import random
 
 from .base import BaseDataset
@@ -80,6 +81,25 @@ class RLBenchDataset(BaseDataset):
     def _get_intrinsics(self, idx):
         return self._get_attr_by_idx(idx, 'intrinsics', True)
 
+    def _n_chunks(self):
+        """Number of distinct chunks the dataset resolves to.
+
+        Default is `len(annos) // chunk_size`. Subclasses that filter the
+        sample set (e.g. task-filtered views) override this.
+        """
+        return len(self.annos['action']) // self.chunk_size
+
+    def _resolve_idx(self, idx):
+        """Map a raw __getitem__ idx into a zarr-space chunk-start index.
+
+        Subclasses that filter can override to remap through an index list.
+        """
+        idx = idx % self._n_chunks()
+        return idx * self.chunk_size
+
+    def __len__(self):
+        return self.copies * self._n_chunks()
+
     def __getitem__(self, idx):
         """
         self.annos: {
@@ -93,23 +113,38 @@ class RLBenchDataset(BaseDataset):
             intrinsics: (N, n_cam, 3, 3) float
         }
         """
-        # First detect which copy we fall into
-        idx = idx % (len(self.annos['action']) // self.chunk_size)
-        # and then which chunk
-        idx = idx * self.chunk_size
+        idx = self._resolve_idx(idx)
         if self._actions_only:
             return {"action": self._get_action(idx)}
-        return {
+        sample = {
             "task": self._get_task(idx),  # [str]
             "instr": self._get_instr(idx),  # [str]
-            "rgb": self._get_rgb(idx),  # tensor(n_cam3d, 3, H, W)
-            "depth": self._get_depth(idx),  # tensor(n_cam3d, H, W)
-            "rgb2d": self._get_rgb2d(idx),  # tensor(n_cam2d, 3, H, W)
-            "proprioception": self._get_proprioception(idx),  # tensor(1, 8)
-            "action": self._get_action(idx),  # tensor(T, 8)
-            "extrinsics": self._get_extrinsics(idx),  # tensor(n_cam3d, 4, 4)
-            "intrinsics": self._get_intrinsics(idx)  # tensor(n_cam3d, 3, 3)
+            "rgb": self._get_rgb(idx),  # tensor(chunk, n_cam3d, 3, H, W)
+            "depth": self._get_depth(idx),  # tensor(chunk, n_cam3d, H, W)
+            "rgb2d": self._get_rgb2d(idx),  # tensor(chunk, n_cam2d, 3, H, W) or None
+            "proprioception": self._get_proprioception(idx),  # tensor(chunk, nhist, 2, 8)
+            "action": self._get_action(idx),  # tensor(chunk, T, 2, 8)
+            "extrinsics": self._get_extrinsics(idx),  # tensor(chunk, n_cam3d, 4, 4)
+            "intrinsics": self._get_intrinsics(idx)  # tensor(chunk, n_cam3d, 3, 3)
         }
+        # Mesa bimanual arm-swap augmentation. Default off; enable per-run via
+        # MESA_ARM_SWAP_AUG=on to swap arm indices (and the two wrist cameras)
+        # with 50% probability per sample. Breaks the structural correlation
+        # between arm index and activity pattern in the Mesa multitask data.
+        # Assumes zarr camera order (head, robot0_wrist, robot1_wrist); safe
+        # for Mesa datasets where camera_inds is None.
+        if (
+            os.environ.get("MESA_ARM_SWAP_AUG", "off") == "on"
+            and random.random() < 0.5
+        ):
+            sample["action"] = sample["action"][:, :, [1, 0], :]
+            sample["proprioception"] = sample["proprioception"][:, :, [1, 0], :]
+            cam_perm = [0, 2, 1]
+            sample["rgb"] = sample["rgb"][:, cam_perm]
+            sample["depth"] = sample["depth"][:, cam_perm]
+            sample["extrinsics"] = sample["extrinsics"][:, cam_perm]
+            sample["intrinsics"] = sample["intrinsics"][:, cam_perm]
+        return sample
 
 
 class HiveformerDataset(RLBenchDataset):

@@ -470,10 +470,26 @@ class BaseTrainTester:
             print("All keys matched successfully!")
         # EMA weights
         if model_dict.get("ema_weight") is not None:
-            ema_model.load_state_dict(model_dict["ema_weight"], strict=True)
+            ema_msn, ema_unxpct = ema_model.load_state_dict(
+                model_dict["ema_weight"], strict=False
+            )
+            if ema_msn or ema_unxpct:
+                print("EMA checkpoint only partially matched current model; "
+                      "continuing without strict resume.")
+                if ema_msn:
+                    print(f"Missing EMA keys: {len(ema_msn)}")
+                    print(ema_msn)
+                if ema_unxpct:
+                    print(f"Unexpected EMA keys: {len(ema_unxpct)}")
+                    print(ema_unxpct)
         # Useful for resuming training
         if 'optimizer' in model_dict and not self.args.eval_only:
-            optimizer.load_state_dict(model_dict["optimizer"])
+            try:
+                optimizer.load_state_dict(model_dict["optimizer"])
+            except ValueError as exc:
+                print("Optimizer state did not match current model; "
+                      "continuing with a fresh optimizer.")
+                print(exc)
         start_iter = model_dict.get("iter", 0)
         best_loss = model_dict.get("best_loss", None)
 

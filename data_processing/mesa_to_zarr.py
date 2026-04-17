@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -18,6 +19,7 @@ NUM_HISTORY = 3
 DOF_PER_HAND = 8
 ZNEAR = 0.001
 ZFAR = 50.0
+EXTENT = 11.831  # Mesa MJCF scene characteristic length; required for metric depth
 JAW_MIN = 0.079
 JAW_MAX = 0.121
 DEFAULT_MOTION_THRESHOLD = 0.02
@@ -57,13 +59,38 @@ def parse_args():
         "--motion_threshold",
         type=float,
         default=DEFAULT_MOTION_THRESHOLD,
-        help="Motion threshold (meters) for keypose detection.",
+        help="Motion threshold (meters) for the legacy MESA keypose heuristic.",
+    )
+    parser.add_argument(
+        "--keypose_method",
+        choices=("mesa", "peract2"),
+        default="mesa",
+        help=(
+            "Keypose heuristic to use. 'mesa' keeps the original motion-threshold "
+            "logic; 'peract2' mirrors the RLBench/PerAct2 stop-and-gripper-change heuristic."
+        ),
+    )
+    parser.add_argument(
+        "--stopping_delta",
+        type=float,
+        default=0.1,
+        help="Joint-velocity tolerance for the PerAct2-style keypose heuristic.",
     )
     parser.add_argument(
         "--action_horizon",
         type=int,
         default=1,
         help="Number of future actions to store per sample.",
+    )
+    parser.add_argument(
+        "--instructions",
+        type=str,
+        default=None,
+        help=(
+            "Path to the training instructions JSON.  When provided, task_ids "
+            "are assigned based on each task's position in the JSON key order, "
+            "ensuring alignment with the training dataset for subset builds."
+        ),
     )
     return parser.parse_args()
 
@@ -163,7 +190,7 @@ def build_history(states, timesteps, num_history=NUM_HISTORY):
 
 def linearize_depth(z_buffer):
     z_buffer = _cast_float32(z_buffer)
-    return ZNEAR / (1.0 - z_buffer * (1.0 - ZNEAR / ZFAR))
+    return ZNEAR * EXTENT / (1.0 - z_buffer * (1.0 - ZNEAR / ZFAR))
 
 
 def extract_observation_tensors(obs_group):
@@ -218,6 +245,74 @@ def detect_keyposes(action_states, motion_threshold):
     return key_idxs.astype(np.int64)
 
 
+def _gripper_open_from_obs(obs_group):
+    grip_open = []
+    for hand_idx in range(NUM_HANDS):
+        jaw_width = _cast_float32(obs_group[f"robot{hand_idx}_gripper_jaw_width"][:])
+        grip_norm = np.clip((jaw_width - JAW_MIN) / (JAW_MAX - JAW_MIN), 0.0, 1.0)
+        grip_open.append(grip_norm > 0.5)
+    return np.stack(grip_open, axis=1)
+
+
+def _joint_vel_from_obs(obs_group):
+    joint_vel = []
+    for hand_idx in range(NUM_HANDS):
+        joint_vel.append(_cast_float32(obs_group[f"robot{hand_idx}_joint_vel"][:]))
+    return np.stack(joint_vel, axis=1)
+
+
+def _is_stopped_peract2(grip_open, joint_vel, i, hand_idx, stopping_delta):
+    num_steps = grip_open.shape[0]
+    next_is_not_final = i == (num_steps - 2)
+    gripper_state_no_change = i < (num_steps - 2) and (
+        grip_open[i, hand_idx] == grip_open[i + 1, hand_idx]
+        and grip_open[i, hand_idx] == grip_open[max(0, i - 1), hand_idx]
+        and grip_open[max(0, i - 2), hand_idx] == grip_open[max(0, i - 1), hand_idx]
+    )
+    small_delta = np.allclose(joint_vel[i, hand_idx], 0, atol=stopping_delta)
+    return small_delta and (not next_is_not_final) and gripper_state_no_change
+
+
+def detect_keyposes_peract2(obs_group, stopping_delta):
+    """
+    Mirror the RLBench/PerAct2 heuristic:
+    - keypose on either gripper state change
+    - keypose when both arms are stopped
+    - always include the last timestep
+    The initial frame is added separately by keypose_indices().
+    """
+    grip_open = _gripper_open_from_obs(obs_group)
+    joint_vel = _joint_vel_from_obs(obs_group)
+    num_steps = grip_open.shape[0]
+    if num_steps <= 1:
+        return np.array([], dtype=np.int64)
+
+    episode_keypoints = []
+    prev_grip_open = grip_open[0].copy()
+    stopped_buffer = 0
+
+    for i in range(num_steps):
+        right_stopped = _is_stopped_peract2(grip_open, joint_vel, i, 0, stopping_delta)
+        left_stopped = _is_stopped_peract2(grip_open, joint_vel, i, 1, stopping_delta)
+        stopped = (stopped_buffer <= 0) and right_stopped and left_stopped
+        stopped_buffer = 4 if stopped else stopped_buffer - 1
+
+        last = i == (num_steps - 1)
+        state_changed = np.any(grip_open[i] != prev_grip_open)
+        if i != 0 and (state_changed or last or stopped):
+            episode_keypoints.append(i)
+
+        prev_grip_open = grip_open[i].copy()
+
+    if (
+        len(episode_keypoints) > 1
+        and (episode_keypoints[-1] - 1) == episode_keypoints[-2]
+    ):
+        episode_keypoints.pop(-2)
+
+    return np.asarray(episode_keypoints, dtype=np.int64)
+
+
 def dense_indices(num_steps, action_horizon=1):
     current = np.arange(num_steps, dtype=np.int64)
     offsets = np.arange(1, action_horizon + 1, dtype=np.int64)
@@ -225,17 +320,31 @@ def dense_indices(num_steps, action_horizon=1):
     return current, target
 
 
-def keypose_indices(action_states, motion_threshold, action_horizon=1):
-    key_idx = detect_keyposes(action_states, motion_threshold)
-    if key_idx.size == 0:
-        return key_idx, key_idx.reshape(0, action_horizon)
+def keypose_indices(
+    action_states,
+    obs_group,
+    keypose_method,
+    motion_threshold,
+    stopping_delta,
+    action_horizon=1,
+):
+    if keypose_method == "peract2":
+        key_idx = detect_keyposes_peract2(obs_group, stopping_delta)
+        key_idx = np.concatenate(([0], key_idx))
+    else:
+        key_idx = detect_keyposes(action_states, motion_threshold)
+
+    if key_idx.size <= 1:
+        return np.array([], dtype=np.int64), np.empty((0, action_horizon), dtype=np.int64)
+
+    src_idx = key_idx[:-1]
     offsets = np.arange(1, action_horizon + 1, dtype=np.int64)
     target_pos = np.minimum(
-        np.arange(key_idx.size, dtype=np.int64)[:, None] + offsets[None, :],
+        np.arange(src_idx.size, dtype=np.int64)[:, None] + offsets[None, :],
         key_idx.size - 1,
     )
     target = key_idx[target_pos]
-    return key_idx, target
+    return src_idx, target
 
 
 def create_zarr(path, action_horizon=1):
@@ -282,7 +391,9 @@ def append_demo_samples(
     zarr_group,
     demo_group,
     mode,
+    keypose_method,
     motion_threshold,
+    stopping_delta,
     action_horizon=1,
     task_id=0,
 ):
@@ -298,7 +409,10 @@ def append_demo_samples(
     else:
         src_idx, tgt_idx = keypose_indices(
             action_states,
+            obs,
+            keypose_method,
             motion_threshold,
+            stopping_delta,
             action_horizon=action_horizon,
         )
 
@@ -324,7 +438,9 @@ def convert_single_task(
     hdf5_path,
     output_path,
     mode,
+    keypose_method,
     motion_threshold,
+    stopping_delta,
     action_horizon,
 ):
     """Convert one task's HDF5 to a standalone Zarr. Process-safe."""
@@ -340,7 +456,9 @@ def convert_single_task(
                 zarr_group=zarr_group,
                 demo_group=data_group[demo_key],
                 mode=mode,
+                keypose_method=keypose_method,
                 motion_threshold=motion_threshold,
+                stopping_delta=stopping_delta,
                 action_horizon=action_horizon,
                 task_id=task_id,
             )
@@ -364,7 +482,15 @@ def _merge_zarrs(tmp_dir, task_entries, final_path, action_horizon=1, chunk_size
     return final
 
 
-def build_mode_dataset(task_entries, output_dir, mode, motion_threshold, action_horizon):
+def build_mode_dataset(
+    task_entries,
+    output_dir,
+    mode,
+    keypose_method,
+    motion_threshold,
+    stopping_delta,
+    action_horizon,
+):
     """
     task_entries: list of (task_name, task_id, hdf5_path)
     """
@@ -393,7 +519,9 @@ def build_mode_dataset(task_entries, output_dir, mode, motion_threshold, action_
                 hdf5_path,
                 tmp_path,
                 mode,
+                keypose_method,
                 motion_threshold,
+                stopping_delta,
                 action_horizon,
             )
             futures[fut] = task_name
@@ -426,10 +554,14 @@ def build_mode_dataset(task_entries, output_dir, mode, motion_threshold, action_
     print(f"  val:   {val_zarr}", flush=True)
 
 
-def discover_tasks(input_dir):
+def discover_tasks(input_dir, instructions_file=None):
     """
     Discover task subdirectories and return sorted (task_name, task_id, hdf5_path).
-    Task order is alphabetical — must match datasets/mesa.py MESA_TASKS.
+
+    When *instructions_file* is provided, task_ids are assigned based on each
+    task's position in the JSON key order — matching the training dataset's
+    task list even for subset builds.  Without it, task_ids are assigned by
+    local alphabetical enumeration (correct only when all tasks are present).
     """
     input_dir = Path(input_dir)
     task_names = sorted(
@@ -437,8 +569,20 @@ def discover_tasks(input_dir):
         for d in input_dir.iterdir()
         if d.is_dir() and (d / "demo" / "demo.hdf5").exists()
     )
+    if instructions_file is not None:
+        ref_tasks = list(json.load(open(instructions_file)).keys())
+        ref_index = {name: idx for idx, name in enumerate(ref_tasks)}
     entries = []
-    for task_id, task_name in enumerate(task_names):
+    for i, task_name in enumerate(task_names):
+        if instructions_file is not None:
+            if task_name not in ref_index:
+                raise ValueError(
+                    f"Task '{task_name}' not in instructions file "
+                    f"'{instructions_file}'"
+                )
+            task_id = ref_index[task_name]
+        else:
+            task_id = i
         hdf5_path = str(input_dir / task_name / "demo" / "demo.hdf5")
         entries.append((task_name, task_id, hdf5_path))
     return entries
@@ -451,7 +595,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.input_dir:
-        task_entries = discover_tasks(args.input_dir)
+        task_entries = discover_tasks(args.input_dir, args.instructions)
         print(f"Discovered {len(task_entries)} tasks in {args.input_dir}")
     else:
         task_entries = [("single_task", 0, args.input_hdf5)]
@@ -462,7 +606,9 @@ def main():
             task_entries=task_entries,
             output_dir=args.output_dir,
             mode=mode,
+            keypose_method=args.keypose_method,
             motion_threshold=args.motion_threshold,
+            stopping_delta=args.stopping_delta,
             action_horizon=args.action_horizon,
         )
 
