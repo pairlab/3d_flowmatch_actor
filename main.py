@@ -83,6 +83,8 @@ def parse_arguments():
         ('use_wandb', str2bool, False),
         ('wandb_project', str, "3dfa"),
         ('wandb_entity', str_none, None),
+        ('wandb_group', str_none, None),
+        ('wandb_run_name', str_none, None),
         # Node-local data staging
         ('pace_copy', str2bool, False),
         ('pace_tmp_dir', str_none, None),

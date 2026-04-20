@@ -1,4 +1,5 @@
 from .mesa import MesaBimanualDataset, MesaBimanualMultiTaskDataset
+from .mesa70 import Mesa70Dataset, Mesa70MultiTaskDataset
 from .rlbench import (
     Peract2Dataset,
     Peract2SingleCamDataset,
@@ -13,6 +14,8 @@ def fetch_dataset_class(dataset_name):
     dataset_classes = {
         "MesaBimanual": MesaBimanualDataset,
         "MesaBimanualMultiTask": MesaBimanualMultiTaskDataset,
+        "Mesa70": Mesa70Dataset,
+        "Mesa70MultiTask": Mesa70MultiTaskDataset,
         "Peract2_3dfront_3dwrist": Peract2Dataset,
         "Peract2_3dfront": Peract2SingleCamDataset,
         "Peract": PeractDataset,

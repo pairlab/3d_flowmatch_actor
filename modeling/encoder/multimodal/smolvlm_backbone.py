@@ -15,9 +15,10 @@ import torch
 from torch import nn
 
 try:
-    from transformers.cache_utils import DynamicCache
+    from transformers.cache_utils import DynamicCache, DynamicLayer
 except ImportError:
     DynamicCache = None  # will raise at runtime if KV cache path is used
+    DynamicLayer = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +173,16 @@ class MixedPositionTextBackbone(nn.Module):
         device = action_embeds.device
         dtype = action_embeds.dtype
 
-        # Seed fresh cache (no tensor copies)
+        # Seed fresh cache from prefix K/V (no tensor copies, prefix_kv stays frozen)
         action_cache = DynamicCache()
-        action_cache.key_cache = list(prefix_kv.key_cache)
-        action_cache.value_cache = list(prefix_kv.value_cache)
-        action_cache._seen_tokens = n_prefix
+        for layer in prefix_kv.layers:
+            new_layer = DynamicLayer()
+            new_layer.keys = layer.keys
+            new_layer.values = layer.values
+            new_layer.dtype = layer.dtype
+            new_layer.device = layer.device
+            new_layer.is_initialized = True
+            action_cache.layers.append(new_layer)
 
         cache_position = torch.arange(n_prefix, n_prefix + n_action, device=device)
         position_ids = cache_position.unsqueeze(0).expand(B, -1)
