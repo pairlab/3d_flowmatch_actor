@@ -31,7 +31,10 @@ class DenoiseActor(nn.Module):
                  denoise_timesteps=100,
                  denoise_model="ddpm",
                  # Training arguments
-                 lv2_batch_size=1):
+                 lv2_batch_size=1,
+                 # Subclass hook: skip default traj_encoder / prediction_head
+                 # when the subclass owns its own action head
+                 build_default_action_head=True):
         super().__init__()
         # Arguments to be accessed by the main class
         self._rotation_format = rotation_format
@@ -42,17 +45,18 @@ class DenoiseActor(nn.Module):
         self.encoder = None  # Implement this!
 
         # Action decoder, runs at every denoising timestep
-        self.traj_encoder = nn.Linear(
-            6 if rotation_format == 'euler' else 9,  # XYZ + Euler or 6D
-            embedding_dim
-        )
-        self.prediction_head = TransformerHead(
-            embedding_dim=embedding_dim,
-            nhist=nhist * nhand,
-            num_attn_heads=num_attn_heads,
-            num_shared_attn_layers=num_shared_attn_layers,
-            rot_dim=3 if rotation_format == 'euler' else 6
-        )
+        if build_default_action_head:
+            self.traj_encoder = nn.Linear(
+                6 if rotation_format == 'euler' else 9,  # XYZ + Euler or 6D
+                embedding_dim
+            )
+            self.prediction_head = TransformerHead(
+                embedding_dim=embedding_dim,
+                nhist=nhist * nhand,
+                num_attn_heads=num_attn_heads,
+                num_shared_attn_layers=num_shared_attn_layers,
+                rot_dim=3 if rotation_format == 'euler' else 6
+            )
 
         # Noise/denoise schedulers and hyperparameters
         self.position_scheduler, self.rotation_scheduler = fetch_schedulers(

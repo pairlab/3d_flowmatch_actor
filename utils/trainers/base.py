@@ -127,24 +127,44 @@ class BaseTrainTester:
 
     def get_model(self):
         """Initialize the model."""
-        # Initialize model with arguments
-        _model = self.model_cls(
-            backbone=self.args.backbone,
-            finetune_backbone=self.args.finetune_backbone,
-            finetune_text_encoder=self.args.finetune_text_encoder,
-            num_vis_instr_attn_layers=self.args.num_vis_instr_attn_layers,
-            fps_subsampling_factor=self.args.fps_subsampling_factor,
+        model_kwargs = dict(
             embedding_dim=self.args.embedding_dim,
             num_attn_heads=self.args.num_attn_heads,
             nhist=self.args.num_history,
             nhand=2 if self.args.bimanual else 1,
-            num_shared_attn_layers=self.args.num_shared_attn_layers,
-            relative=self.args.relative_action,
             rotation_format=self.args.rotation_format,
             denoise_timesteps=self.args.denoise_timesteps,
             denoise_model=self.args.denoise_model,
-            lv2_batch_size=self.args.lv2_batch_size
+            lv2_batch_size=self.args.lv2_batch_size,
         )
+        if self.args.model_type.startswith("smolvla"):
+            model_kwargs.update(
+                smolvlm_model_name=self.args.smolvlm_model_name,
+                smolvlm_local_files_only=self.args.smolvlm_local_files_only,
+                smolvlm_freeze_vision_tower=self.args.smolvlm_freeze_vision_tower,
+                smolvlm_freeze_connector=self.args.smolvlm_freeze_connector,
+                smolvlm_freeze_text_model=self.args.smolvlm_freeze_text_model,
+                smolvlm_freeze_text_embeddings=self.args.smolvlm_freeze_text_embeddings,
+                smolvlm_tokenizer_max_length=self.args.smolvlm_tokenizer_max_length,
+                smolvlm_append_state_tokens=self.args.smolvlm_append_state_tokens,
+                smolvlm_state_dim=self.args.smolvlm_state_dim,
+                smolvlm_num_state_tokens=self.args.smolvlm_num_state_tokens,
+                smolvlm_lora_rank=self.args.smolvlm_lora_rank,
+                smolvlm_lora_alpha=self.args.smolvlm_lora_alpha,
+                smolvlm_lora_last_n_layers=self.args.smolvlm_lora_last_n_layers,
+                smolvlm_xyz_rope_scale=self.args.smolvlm_xyz_rope_scale,
+            )
+        else:
+            model_kwargs.update(
+                backbone=self.args.backbone,
+                finetune_backbone=self.args.finetune_backbone,
+                finetune_text_encoder=self.args.finetune_text_encoder,
+                num_vis_instr_attn_layers=self.args.num_vis_instr_attn_layers,
+                fps_subsampling_factor=self.args.fps_subsampling_factor,
+                num_shared_attn_layers=self.args.num_shared_attn_layers,
+                relative=self.args.relative_action,
+            )
+        _model = self.model_cls(**model_kwargs)
 
         # Print basic modules' parameters
         if dist.get_rank() == 0:
@@ -247,7 +267,13 @@ class BaseTrainTester:
 
         # Get model
         model = self.get_model()
-        self.tokenizer = fetch_tokenizers(self.args.backbone)
+        # SmolVLA tokenizes inside its own encoder (SmolVLM processor), so it
+        # doesn't need a pre-step CLIP tokenizer. Loading CLIPTokenizer here
+        # would hit an offline cache miss on smolvlm-venv's HF_HOME.
+        if self.args.model_type.startswith("smolvla"):
+            self.tokenizer = None
+        else:
+            self.tokenizer = fetch_tokenizers(self.args.backbone)
         if not os.path.exists(self.args.checkpoint):
             normalizer = self.get_workspace_normalizer()
             model.workspace_normalizer.copy_(normalizer)
